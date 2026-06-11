@@ -3,21 +3,23 @@ local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local lp       = Players.LocalPlayer
+-- Menunggu sampai LocalPlayer benar-benar termuat (Mencegah error saat auto-exec)
+while not Players.LocalPlayer do task.wait(0.1) end
+local lp = Players.LocalPlayer
 local username = lp.Name
+
 local enabled    = false
-local tweenSpeed = 0       -- FIX #2: default 0 = instant TP (was 0.1)
+local tweenSpeed = 0
 local useTween   = true
 local farmThread = nil
 local antiAfkOn  = false
 local antiAfkConn   = nil
-local antiAfkThread = nil  -- FIX #1: proactive anti-afk thread
+local antiAfkThread = nil
 local storageThreshold = 0
 local tpSpeed          = 0.06
 
 -- ============================================
--- FIX #1: ANTI AFK — proactive loop + Idled fallback
--- Roblox kicks at 20 min idle → we press W every 14 min
+-- ANTI AFK
 -- ============================================
 local function setAntiAfk(on)
     antiAfkOn = on
@@ -30,19 +32,16 @@ local function setAntiAfk(on)
         antiAfkThread = nil
     end
     if on then
-        -- Proactive loop: reset idle timer every 14 minutes
         antiAfkThread = task.spawn(function()
             while antiAfkOn do
-                task.wait(14 * 60) -- 14 minutes
+                task.wait(14 * 60)
                 if not antiAfkOn then break end
-                -- Method 1: VirtualInputManager
                 pcall(function()
                     local vp = game:GetService("VirtualInputManager")
                     vp:SendKeyEvent(true,  Enum.KeyCode.W, false, game)
                     task.wait(0.15)
                     vp:SendKeyEvent(false, Enum.KeyCode.W, false, game)
                 end)
-                -- Method 2: Humanoid move (backup)
                 pcall(function()
                     local char = lp.Character
                     local hum  = char and char:FindFirstChildOfClass("Humanoid")
@@ -54,7 +53,6 @@ local function setAntiAfk(on)
                 end)
             end
         end)
-        -- Backup: also fire when Idled event triggers
         antiAfkConn = lp.Idled:Connect(function()
             pcall(function()
                 local vp = game:GetService("VirtualInputManager")
@@ -89,7 +87,6 @@ local function getBuildings()
     return plot and plot:FindFirstChild("Buildings") or nil
 end
 
--- FIX #3: All collectible building types (includes Solar)
 local COLLECT_TYPES = {
     Refinery   = true,
     Solar      = true,
@@ -102,15 +99,12 @@ local COLLECT_TYPES = {
 }
 
 local function getValues(model)
-    -- Cara 1: path original
     local ok, obj = pcall(function() return model.Primary.Info.Main.Value end)
     if ok and obj then
         local text = ((obj.Text or obj.Value or "")):gsub(",", "")
         local c, m = text:match("(%d+)/(%d+)")
         if c and m then return tonumber(c), tonumber(m) end
     end
-
-    -- Cara 2: scan semua TextLabel/TextBox
     for _, v in ipairs(model:GetDescendants()) do
         if v:IsA("TextLabel") or v:IsA("TextBox") then
             local t = (v.Text or ""):gsub(",", ""):gsub("%s", "")
@@ -118,8 +112,6 @@ local function getValues(model)
             if c and m then return tonumber(c), tonumber(m) end
         end
     end
-
-    -- Cara 3: GetAttribute (includes energy/electric attrs)
     local cur = model:GetAttribute("StoredGas")
               or model:GetAttribute("Storage")
               or model:GetAttribute("Current")
@@ -130,7 +122,7 @@ local function getValues(model)
               or model:GetAttribute("Capacity")
               or model:GetAttribute("Max")
     if cur ~= nil and max ~= nil then return cur, max end
-    return 0, 0   -- FIX: was returning 0,1 causing false positives
+    return 0, 0
 end
 
 local function getPrimary(model)
@@ -139,7 +131,6 @@ local function getPrimary(model)
     return model.PrimaryPart
 end
 
--- FIX #3: getCollectibles — includes Solar + any model with storage
 local function getCollectibles(buildings)
     local list = {}
     for _, m in ipairs(buildings:GetChildren()) do
@@ -150,7 +141,6 @@ local function getCollectibles(buildings)
                     list[#list + 1] = m
                 end
             else
-                -- Tidak ada Type attribute: cek apakah ada storage
                 local _, max = getValues(m)
                 if max > 0 then list[#list + 1] = m end
             end
@@ -159,11 +149,8 @@ local function getCollectibles(buildings)
     return list
 end
 
-local getRefineries = getCollectibles -- alias
-
 -- ============================================
 -- TELEPORT
--- FIX #2: tweenSpeed > 0 (was > 0.05) → slider di 0.0 = instant
 -- ============================================
 local function teleport(targetCF)
     local char = lp.Character
@@ -173,7 +160,7 @@ local function teleport(targetCF)
     local hum = char:FindFirstChildOfClass("Humanoid")
     hrp.Anchored = true
     if hum then hum.PlatformStand = true end
-    if useTween and tweenSpeed > 0 then  -- FIX: was > 0.05
+    if useTween and tweenSpeed > 0 then
         local startCF  = hrp.CFrame
         local elapsed  = 0
         local duration = tweenSpeed
@@ -190,10 +177,9 @@ local function teleport(targetCF)
 end
 
 -- ============================================
--- COLLECT — supports Solar/Electric remotes
+-- COLLECT
 -- ============================================
 local collectRemote = nil
-
 local function cacheCollectRemote()
     if collectRemote then return end
     for _, v in ipairs(ReplicatedStorage:GetDescendants()) do
@@ -202,7 +188,7 @@ local function cacheCollectRemote()
             if n:find("collect") or n:find("pickup")
             or n:find("refinery") or n:find("harvest")
             or n:find("farm") or n:find("drain")
-            or n:find("solar") or n:find("electric")  -- FIX #3: solar/electric
+            or n:find("solar") or n:find("electric")
             or n:find("energy") or n:find("generate") then
                 collectRemote = v
                 return
@@ -213,46 +199,29 @@ end
 
 local function collectFromBuilding(model)
     local fired = false
-    -- Cara 1: semua ProximityPrompt di descendants
     for _, v in ipairs(model:GetDescendants()) do
         if v:IsA("ProximityPrompt") then
-            pcall(function()
-                fireproximityprompt(v)
-                fired = true
-            end)
+            pcall(function() fireproximityprompt(v) fired = true end)
             task.wait(0.08)
         end
     end
-
-    -- Cara 2: ProximityPrompt di Primary
     local primary = getPrimary(model)
     if primary then
         for _, v in ipairs(primary:GetChildren()) do
             if v:IsA("ProximityPrompt") then
-                pcall(function()
-                    fireproximityprompt(v)
-                    fired = true
-                end)
+                pcall(function() fireproximityprompt(v) fired = true end)
                 task.wait(0.08)
             end
         end
     end
-
-    -- Cara 3: RemoteEvent collect
     cacheCollectRemote()
     if collectRemote then
-        pcall(function()
-            collectRemote:FireServer(model)
-            fired = true
-        end)
+        pcall(function() collectRemote:FireServer(model) fired = true end)
     end
-
-    -- Cara 4: Scan semua RemoteEvent relevan dengan Filter Anti-Sell
     if not fired then
         for _, v in ipairs(ReplicatedStorage:GetDescendants()) do
             if v:IsA("RemoteEvent") then
                 local n = v.Name:lower()
-                -- FIX: Abaikan jika nama remote mengandung kata sell, store, shop
                 if not n:find("sell") and not n:find("store") and not n:find("shop") and not n:find("buy") then
                     if n:find("gas") or n:find("oil") or n:find("fuel")
                     or n:find("solar") or n:find("electric") or n:find("energy") then
@@ -265,8 +234,6 @@ local function collectFromBuilding(model)
     end
 end
 
-local collectFromRefinery = collectFromBuilding -- alias
-
 -- ============================================
 -- FARM LOOP
 -- ============================================
@@ -276,8 +243,6 @@ local function farmLoop()
         if not buildings then task.wait(1) continue end
         local list = getCollectibles(buildings)
         if #list == 0 then task.wait(1) continue end
-
-        -- Urutkan dari yang paling penuh
         table.sort(list, function(a, b)
             local ca, ma = getValues(a)
             local cb, mb = getValues(b)
@@ -285,24 +250,18 @@ local function farmLoop()
             local fb = (mb > 0) and (cb / mb) or 0
             return fa > fb
         end)
-
         local visited = 0
         for _, model in ipairs(list) do
             if not enabled then break end
             if not model.Parent then continue end
             local cur, max = getValues(model)
-
             if cur > 0 then
                 local pct = (max > 0) and (cur / max * 100) or 0
                 if pct >= storageThreshold then
                     local primary = getPrimary(model)
                     if primary then
                         local yOff = (primary.Size.Y / 2) + 3.2
-                        teleport(CFrame.new(
-                            primary.Position.X,
-                            primary.Position.Y + yOff,
-                            primary.Position.Z
-                        ))
+                        teleport(CFrame.new(primary.Position.X, primary.Position.Y + yOff, primary.Position.Z))
                         task.wait(tpSpeed)
                         collectFromBuilding(model)
                         task.wait(tpSpeed)
@@ -311,12 +270,7 @@ local function farmLoop()
                 end
             end
         end
-
-        if visited == 0 then
-            task.wait(0.5)
-        else
-            task.wait(0.1)
-        end
+        if visited == 0 then task.wait(0.5) else task.wait(0.1) end
     end
 end
 
@@ -348,11 +302,9 @@ local function cacheSellAssets()
     end
     if not sellRemote then
         for _, v in ipairs(ReplicatedStorage:GetDescendants()) do
-            if v:IsA("RemoteEvent") and (
-                v.Name:lower():find("gas") or
-                v.Name:lower():find("store") or
-                v.Name:lower():find("shop")
-            ) then sellRemote = v; break end
+            if v:IsA("RemoteEvent") and (v.Name:lower():find("gas") or v.Name:lower():find("store") or v.Name:lower():find("shop")) then 
+                sellRemote = v; break 
+            end
         end
     end
     return true
@@ -364,42 +316,6 @@ local function vimClick(btn)
     vp:SendMouseButtonEvent(pos.X, pos.Y, 0, true,  game, 0)
     task.wait(0.08)
     vp:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
-end
-
-local function doTeleportToStore()
-    local standPart = sellStore:FindFirstChild("Primary", true)
-    if not standPart or not standPart:IsA("BasePart") then
-        for _, v in ipairs(sellStore:GetDescendants()) do
-            if v:IsA("BasePart") then standPart = v; break end
-        end
-    end
-    if not standPart then return nil end
-    local char = lp.Character
-    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
-    local hum  = char and char:FindFirstChildOfClass("Humanoid")
-    if not hrp then return nil end
-    local savedCF = hrp.CFrame
-    hrp.Anchored = true
-    if hum then hum.PlatformStand = true end
-    hrp.CFrame = standPart.CFrame * CFrame.new(0, 4, 0)
-    task.wait()
-    hrp.Anchored = false
-    if hum then hum.PlatformStand = false end
-    return savedCF
-end
-
-local function doTeleportBack(savedCF)
-    if not savedCF then return end
-    local char = lp.Character
-    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
-    local hum  = char and char:FindFirstChildOfClass("Humanoid")
-    if not hrp then return end
-    hrp.Anchored = true
-    if hum then hum.PlatformStand = true end
-    hrp.CFrame = savedCF
-    task.wait()
-    hrp.Anchored = false
-    if hum then hum.PlatformStand = false end
 end
 
 local function trySell()
@@ -423,15 +339,9 @@ local function sellLoop()
         end
     end
     while sellEnabled do
-        local okP, price = pcall(function()
-            return ReplicatedStorage.GasPrice.Value
-        end)
-        if not okP or type(price) ~= "number" then
-            task.wait(2); continue
-        end
-        local okG, gasoline = pcall(function()
-            return lp.leaderstats.Gasoline.Value
-        end)
+        local okP, price = pcall(function() return ReplicatedStorage.GasPrice.Value end)
+        if not okP or type(price) ~= "number" then task.wait(2); continue end
+        local okG, gasoline = pcall(function() return lp.leaderstats.Gasoline.Value end)
         local hasEnoughGas = okG and type(gasoline) == "number" and gasoline >= minGasoline
         if price >= sellPrice and hasEnoughGas then
             local wasEnabled = enabled
@@ -456,22 +366,49 @@ local function sellLoop()
 end
 
 -- ============================================
--- GUI
+-- GUI LOAD & CLEANUP (FIXED)
 -- ============================================
+local GUI_NAME = "DrillFarmGUI"
+
+-- Menghapus semua sisa GUI lama dari berbagai tempat yang memungkinkan
 pcall(function()
-    local old = game:GetService("CoreGui"):FindFirstChild("DrillFarmGUI")
-    if old then old:Destroy() end
+    if game:GetService("CoreGui"):FindFirstChild(GUI_NAME) then
+        game:GetService("CoreGui")[GUI_NAME]:Destroy()
+    end
+end)
+pcall(function()
+    local pg = lp:FindFirstChild("PlayerGui")
+    if pg and pg:FindFirstChild(GUI_NAME) then
+        pg[GUI_NAME]:Destroy()
+    end
+end)
+pcall(function()
+    if gethui and gethui():FindFirstChild(GUI_NAME) then
+        gethui()[GUI_NAME]:Destroy()
+    end
 end)
 
 local gui = Instance.new("ScreenGui")
-gui.Name           = "DrillFarmGUI"
+gui.Name           = GUI_NAME
 gui.ResetOnSpawn   = false
 gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 gui.DisplayOrder   = 999
-do
-    local ok = pcall(function() gui.Parent = game:GetService("CoreGui") end)
-    if not ok then gui.Parent = lp:WaitForChild("PlayerGui") end
+
+-- Metode injeksi parent yang aman untuk berbagai Executor (Delta/CodeX/Solara)
+local function parentGUI()
+    local success = pcall(function()
+        if gethui then
+            gui.Parent = gethui()
+        else
+            gui.Parent = game:GetService("CoreGui")
+        end
+    end)
+    if not success then
+        local pg = lp:WaitForChild("PlayerGui", 5)
+        if pg then gui.Parent = pg end
+    end
 end
+parentGUI()
 
 local function corner(parent, radius)
     local c = Instance.new("UICorner", parent)
@@ -570,7 +507,7 @@ titleLabel.Font              = Enum.Font.GothamBold
 titleLabel.TextXAlignment    = Enum.TextXAlignment.Left
 
 local bylineLabel = Instance.new("TextLabel", titleBar)
-bylineLabel.Text             = "fixed by claude"
+bylineLabel.Text             = "fixed by claude (v4)"
 bylineLabel.RichText         = true
 bylineLabel.Size             = UDim2.new(1,-95,0,11)
 bylineLabel.Position         = UDim2.new(0,26,0,25)
@@ -681,7 +618,6 @@ end
 local switchBg, switchKnob, switchBtn = mkSwitch(farmCard, false)
 
 -- TWEEN SPEED CARD
--- FIX #2: MIN_S = 0 → slider bisa sampai 0.0s (instant)
 local sliderCard = mkCard(68, 3)
 mkLabel(sliderCard,"Tween Speed",13,14,9,0.55,18,true)
 do
@@ -691,7 +627,7 @@ do
 end
 
 local speedVal = Instance.new("TextLabel", sliderCard)
-speedVal.Text              = "0.0s"   -- FIX #2: default instant
+speedVal.Text              = "0.0s"
 speedVal.Size              = UDim2.new(0.45,-14,0,22)
 speedVal.Position          = UDim2.new(0.55,0,0,9)
 speedVal.BackgroundTransparency = 1
@@ -707,7 +643,7 @@ track.BackgroundColor3 = Color3.fromRGB(36,36,36)
 track.BorderSizePixel  = 0
 corner(track, 99)
 
-local MIN_S, MAX_S = 0, 1.0   -- FIX #2: was 0.1, now 0 for instant
+local MIN_S, MAX_S = 0, 1.0
 local fill = Instance.new("Frame", track)
 fill.Size             = UDim2.new(0,0,1,0)
 fill.BackgroundColor3 = Color3.fromRGB(150,150,150)
@@ -723,7 +659,7 @@ knob.BorderSizePixel  = 0
 knob.ZIndex           = 3
 corner(knob, 99)
 
-mkLabel(sliderCard,"0.0s",11,14,57,0,13,false,Color3.fromRGB(55,55,55))  -- FIX #2: was 0.1s
+mkLabel(sliderCard,"0.0s",11,14,57,0,13,false,Color3.fromRGB(55,55,55))
 local rmax = mkLabel(sliderCard,"1.0s",11,0,57,1,13,false,Color3.fromRGB(55,55,55))
 rmax.TextXAlignment = Enum.TextXAlignment.Right
 rmax.Position = UDim2.new(1,-44,0,57)
@@ -1028,14 +964,10 @@ afkBtn.MouseButton1Click:Connect(function()
     setAntiAfk(antiAfkOn)
     if antiAfkOn then
         afkCheckMark.Text = "✓"
-        TweenService:Create(afkCheckBg, TweenInfo.new(0.15), {
-            BackgroundColor3 = Color3.fromRGB(30,75,55)
-        }):Play()
+        TweenService:Create(afkCheckBg, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(30,75,55)}):Play()
     else
         afkCheckMark.Text = ""
-        TweenService:Create(afkCheckBg, TweenInfo.new(0.15), {
-            BackgroundColor3 = Color3.fromRGB(22,22,22)
-        }):Play()
+        TweenService:Create(afkCheckBg, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(22,22,22)}):Play()
     end
 end)
 
@@ -1046,7 +978,7 @@ footerFrame.BackgroundTransparency = 1
 footerFrame.LayoutOrder       = 99
 
 local footerLbl = Instance.new("TextLabel", footerFrame)
-footerLbl.Text              = "made by dekxonn | fixed by claude (v3)"
+footerLbl.Text              = "made by dekxonn | fixed by claude (v4)"
 footerLbl.Size              = UDim2.new(1,0,1,0)
 footerLbl.BackgroundTransparency = 1
 footerLbl.TextColor3        = Color3.fromRGB(100,100,100)
@@ -1060,22 +992,19 @@ footerLbl.TextXAlignment    = Enum.TextXAlignment.Center
 do
     local dragging, dStart, dPos = false, nil, nil
     titleBar.InputBegan:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1
-        or i.UserInputType == Enum.UserInputType.Touch then
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
             dragging = true; dStart = i.Position; dPos = main.Position
         end
     end)
     UserInputService.InputChanged:Connect(function(i)
         if not dragging then return end
-        if i.UserInputType == Enum.UserInputType.MouseMovement
-        or i.UserInputType == Enum.UserInputType.Touch then
+        if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then
             local d = i.Position - dStart
             main.Position = UDim2.new(dPos.X.Scale, dPos.X.Offset+d.X, dPos.Y.Scale, dPos.Y.Offset+d.Y)
         end
     end)
     UserInputService.InputEnded:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1
-        or i.UserInputType == Enum.UserInputType.Touch then
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
             dragging = false
         end
     end)
@@ -1098,7 +1027,7 @@ end)
 closeBtn.MouseButton1Click:Connect(function()
     enabled     = false
     sellEnabled = false
-    setAntiAfk(false) -- handles antiAfkThread + antiAfkConn cleanup
+    setAntiAfk(false)
     if farmThread then task.cancel(farmThread); farmThread = nil end
     if sellThread then task.cancel(sellThread); sellThread = nil end
     TweenService:Create(main, TweenInfo.new(0.15), {Size = UDim2.new(0,MAIN_W,0,0)}):Play()
@@ -1129,7 +1058,7 @@ switchBtn.MouseButton1Click:Connect(function()
 end)
 
 -- ============================================
--- SLIDER TWEEN SPEED (MIN=0 untuk instant)
+-- SLIDER TWEEN SPEED
 -- ============================================
 local sliderActive = false
 local function setSlider(alpha)
@@ -1140,21 +1069,15 @@ local function setSlider(alpha)
     fill.Size     = UDim2.new(alpha, 0, 1, 0)
     knob.Position = UDim2.new(alpha, 0, 0.5, 0)
 end
-local function alphaFromX(x)
-    return (x - track.AbsolutePosition.X) / track.AbsoluteSize.X
-end
+local function alphaFromX(x) return (x - track.AbsolutePosition.X) / track.AbsoluteSize.X end
 track.InputBegan:Connect(function(i)
-    if i.UserInputType == Enum.UserInputType.MouseButton1 then
-        sliderActive = true; setSlider(alphaFromX(i.Position.X))
-    end
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then sliderActive = true; setSlider(alphaFromX(i.Position.X)) end
 end)
 knob.InputBegan:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 then sliderActive = true end
 end)
 UserInputService.InputChanged:Connect(function(i)
-    if sliderActive and i.UserInputType == Enum.UserInputType.MouseMovement then
-        setSlider(alphaFromX(i.Position.X))
-    end
+    if sliderActive and i.UserInputType == Enum.UserInputType.MouseMovement then setSlider(alphaFromX(i.Position.X)) end
 end)
 UserInputService.InputEnded:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 then sliderActive = false end
@@ -1172,21 +1095,15 @@ local function setThreshSlider(alpha)
     threshFill.Size    = UDim2.new(snapped, 0, 1, 0)
     threshKnob.Position= UDim2.new(snapped, 0, 0.5, 0)
 end
-local function threshAlphaFromX(x)
-    return (x - threshTrack.AbsolutePosition.X) / threshTrack.AbsoluteSize.X
-end
+local function threshAlphaFromX(x) return (x - threshTrack.AbsolutePosition.X) / threshTrack.AbsoluteSize.X end
 threshTrack.InputBegan:Connect(function(i)
-    if i.UserInputType == Enum.UserInputType.MouseButton1 then
-        threshSliderActive = true; setThreshSlider(threshAlphaFromX(i.Position.X))
-    end
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then threshSliderActive = true; setThreshSlider(threshAlphaFromX(i.Position.X)) end
 end)
 threshKnob.InputBegan:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 then threshSliderActive = true end
 end)
 UserInputService.InputChanged:Connect(function(i)
-    if threshSliderActive and i.UserInputType == Enum.UserInputType.MouseMovement then
-        setThreshSlider(threshAlphaFromX(i.Position.X))
-    end
+    if threshSliderActive and i.UserInputType == Enum.UserInputType.MouseMovement then setThreshSlider(threshAlphaFromX(i.Position.X)) end
 end)
 UserInputService.InputEnded:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 then threshSliderActive = false end
@@ -1204,21 +1121,15 @@ local function setTpSlider(alpha)
     tpFill.Size     = UDim2.new(alpha, 0, 1, 0)
     tpKnob.Position = UDim2.new(alpha, 0, 0.5, 0)
 end
-local function tpAlphaFromX(x)
-    return (x - tpTrack.AbsolutePosition.X) / tpTrack.AbsoluteSize.X
-end
+local function tpAlphaFromX(x) return (x - tpTrack.AbsolutePosition.X) / tpTrack.AbsoluteSize.X end
 tpTrack.InputBegan:Connect(function(i)
-    if i.UserInputType == Enum.UserInputType.MouseButton1 then
-        tpSliderActive = true; setTpSlider(tpAlphaFromX(i.Position.X))
-    end
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then tpSliderActive = true; setTpSlider(tpAlphaFromX(i.Position.X)) end
 end)
 tpKnob.InputBegan:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 then tpSliderActive = true end
 end)
 UserInputService.InputChanged:Connect(function(i)
-    if tpSliderActive and i.UserInputType == Enum.UserInputType.MouseMovement then
-        setTpSlider(tpAlphaFromX(i.Position.X))
-    end
+    if tpSliderActive and i.UserInputType == Enum.UserInputType.MouseMovement then setTpSlider(tpAlphaFromX(i.Position.X)) end
 end)
 UserInputService.InputEnded:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 then tpSliderActive = false end
@@ -1282,14 +1193,11 @@ local function gasAlphaToValue(alpha)
 end
 local function gasValueToAlpha(v)
     if v <= GAS_Z1_END then
-        local step = (v - GAS_Z1_START) / GAS_Z1_STEP
-        return step / GAS_TOTAL_STEPS
+        return ((v - GAS_Z1_START) / GAS_Z1_STEP) / GAS_TOTAL_STEPS
     elseif v <= GAS_Z2_END then
-        local step = (v - GAS_Z2_START) / GAS_Z2_STEP
-        return GAS_Z1_ALPHA + step / GAS_TOTAL_STEPS
+        return GAS_Z1_ALPHA + ((v - GAS_Z2_START) / GAS_Z2_STEP) / GAS_TOTAL_STEPS
     else
-        local step = (v - GAS_Z3_START) / GAS_Z3_STEP
-        return GAS_Z2_ALPHA + step / GAS_TOTAL_STEPS
+        return GAS_Z2_ALPHA + ((v - GAS_Z3_START) / GAS_Z3_STEP) / GAS_TOTAL_STEPS
     end
 end
 local gasSliderActive = false
@@ -1301,42 +1209,29 @@ local function setGasSlider(alpha)
     gasFill.Size     = UDim2.new(snappedAlpha, 0, 1, 0)
     gasKnob.Position = UDim2.new(snappedAlpha, 0, 0.5, 0)
 end
-local function gasAlphaFromX(x)
-    return (x - gasTrack.AbsolutePosition.X) / gasTrack.AbsoluteSize.X
-end
+local function gasAlphaFromX(x) return (x - gasTrack.AbsolutePosition.X) / gasTrack.AbsoluteSize.X end
 gasTrack.InputBegan:Connect(function(i)
-    if i.UserInputType == Enum.UserInputType.MouseButton1 then
-        gasSliderActive = true; setGasSlider(gasAlphaFromX(i.Position.X))
-    end
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then gasSliderActive = true; setGasSlider(gasAlphaFromX(i.Position.X)) end
 end)
 gasKnob.InputBegan:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 then gasSliderActive = true end
 end)
 UserInputService.InputChanged:Connect(function(i)
-    if gasSliderActive and i.UserInputType == Enum.UserInputType.MouseMovement then
-        setGasSlider(gasAlphaFromX(i.Position.X))
-    end
+    if gasSliderActive and i.UserInputType == Enum.UserInputType.MouseMovement then setGasSlider(gasAlphaFromX(i.Position.X)) end
 end)
 UserInputService.InputEnded:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 then gasSliderActive = false end
 end)
 
--- HOVER EFFECTS
 for _, btn in ipairs({closeBtn, minBtn, minusBtn, plusBtn}) do
     local norm = btn.BackgroundColor3
-    local hov  = btn == closeBtn and Color3.fromRGB(55,22,22)
-              or btn == minBtn   and Color3.fromRGB(40,40,40)
-              or                     Color3.fromRGB(42,42,42)
-    btn.MouseEnter:Connect(function()
-        TweenService:Create(btn, TweenInfo.new(0.1), {BackgroundColor3 = hov}):Play()
-    end)
-    btn.MouseLeave:Connect(function()
-        TweenService:Create(btn, TweenInfo.new(0.1), {BackgroundColor3 = norm}):Play()
-    end)
+    local hov  = btn == closeBtn and Color3.fromRGB(55,22,22) or btn == minBtn and Color3.fromRGB(40,40,40) or Color3.fromRGB(42,42,42)
+    btn.MouseEnter:Connect(function() TweenService:Create(btn, TweenInfo.new(0.1), {BackgroundColor3 = hov}):Play() end)
+    btn.MouseLeave:Connect(function() TweenService:Create(btn, TweenInfo.new(0.1), {BackgroundColor3 = norm}):Play() end)
 end
 
 -- ============================================
--- COUNTER (Refinery + Solar)
+-- COUNTER
 -- ============================================
 local counterConn1, counterConn2
 local function refreshCounter()
@@ -1374,31 +1269,23 @@ task.spawn(function()
 end)
 
 -- ============================================
--- STATUS REALTIME (GAS PRICE & TIMER)
+-- STATUS REALTIME
 -- ============================================
 task.spawn(function()
     while gui.Parent do
-        local okP, price = pcall(function()
-            return ReplicatedStorage.GasPrice.Value
-        end)
+        local okP, price = pcall(function() return ReplicatedStorage.GasPrice.Value end)
         local priceAbove = okP and type(price) == "number" and price >= sellPrice
         if okP and price then
             gasPriceVal.Text       = "$" .. tostring(price)
-            gasPriceVal.TextColor3 = priceAbove
-                and Color3.fromRGB(110,210,160)
-                or  Color3.fromRGB(180,80,80)
+            gasPriceVal.TextColor3 = priceAbove and Color3.fromRGB(110,210,160) or Color3.fromRGB(180,80,80)
         end
-        local okT, timerTxt = pcall(function()
-            return lp.PlayerGui.Main.SellGas.NextStock.Text
-        end)
+        local okT, timerTxt = pcall(function() return lp.PlayerGui.Main.SellGas.NextStock.Text end)
         if okT and timerTxt and tostring(timerTxt) ~= "" then
             gasTimerLabel.Text = "Next Price in: " .. tostring(timerTxt)
         else
             gasTimerLabel.Text = "Next Price in: —"
         end
-        local okS, spRaw = pcall(function()
-            return lp.PlayerGui.Main.SellGas.Main.Sell.TextLabel.Text
-        end)
+        local okS, spRaw = pcall(function() return lp.PlayerGui.Main.SellGas.Main.Sell.TextLabel.Text end)
         local extracted = (okS and spRaw) and spRaw:match("%$[%d,]+") or "—"
         sellPriceVal.Text = extracted
         do
@@ -1416,4 +1303,4 @@ task.spawn(function()
     end
 end)
 
-print("[Oil Empire] v3 loaded ✅ | Anti-AFK fixed | Instant TP | Solar pickup added!")
+print("[Oil Empire] v4 loaded ✅ | UI Safe-Load | Instant TP | Auto-Sell Fixed!")

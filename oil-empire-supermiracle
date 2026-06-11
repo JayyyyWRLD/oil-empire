@@ -247,15 +247,18 @@ local function collectFromBuilding(model)
         end)
     end
 
-    -- Cara 4: Scan semua RemoteEvent relevan
+    -- Cara 4: Scan semua RemoteEvent relevan dengan Filter Anti-Sell
     if not fired then
         for _, v in ipairs(ReplicatedStorage:GetDescendants()) do
             if v:IsA("RemoteEvent") then
                 local n = v.Name:lower()
-                if n:find("gas") or n:find("oil") or n:find("fuel")
-                or n:find("solar") or n:find("electric") or n:find("energy") then
-                    pcall(function() v:FireServer(model) end)
-                    task.wait(0.05)
+                -- FIX: Abaikan jika nama remote mengandung kata sell, store, shop
+                if not n:find("sell") and not n:find("store") and not n:find("shop") and not n:find("buy") then
+                    if n:find("gas") or n:find("oil") or n:find("fuel")
+                    or n:find("solar") or n:find("electric") or n:find("energy") then
+                        pcall(function() v:FireServer(model) end)
+                        task.wait(0.05)
+                    end
                 end
             end
         end
@@ -318,7 +321,7 @@ local function farmLoop()
 end
 
 -- ============================================
--- AUTO SELL (FIXED TELEPORT LOOPS)
+-- AUTO SELL
 -- ============================================
 local sellPrice   = 10
 local minGasoline = 10000
@@ -379,7 +382,7 @@ local function doTeleportToStore()
     hrp.Anchored = true
     if hum then hum.PlatformStand = true end
     hrp.CFrame = standPart.CFrame * CFrame.new(0, 4, 0)
-    task.wait(0.15)
+    task.wait()
     hrp.Anchored = false
     if hum then hum.PlatformStand = false end
     return savedCF
@@ -394,7 +397,7 @@ local function doTeleportBack(savedCF)
     hrp.Anchored = true
     if hum then hum.PlatformStand = true end
     hrp.CFrame = savedCF
-    task.wait(0.15)
+    task.wait()
     hrp.Anchored = false
     if hum then hum.PlatformStand = false end
 end
@@ -436,25 +439,11 @@ local function sellLoop()
                 enabled = false
                 if farmThread then task.cancel(farmThread); farmThread = nil end
             end
-            
-            -- FIX: Teleport ke Toko Jual terlebih dahulu
-            local savedCF = doTeleportToStore()
-            task.wait(0.2)
-            
             if sellPrompt then
                 pcall(function() fireproximityprompt(sellPrompt) end)
                 task.wait(0.6)
             end
-            
             trySell()
-            task.wait(0.5)
-            
-            -- FIX: Kembalikan posisi karakter ke Plot semula setelah menjual
-            if savedCF then
-                doTeleportBack(savedCF)
-                task.wait(0.2)
-            end
-            
             if wasEnabled then
                 enabled = true
                 farmThread = task.spawn(farmLoop)
@@ -1057,7 +1046,7 @@ footerFrame.BackgroundTransparency = 1
 footerFrame.LayoutOrder       = 99
 
 local footerLbl = Instance.new("TextLabel", footerFrame)
-footerLbl.Text              = "made by dekxonn | fixed by claude (v3.1)"
+footerLbl.Text              = "made by dekxonn | fixed by claude (v3)"
 footerLbl.Size              = UDim2.new(1,0,1,0)
 footerLbl.BackgroundTransparency = 1
 footerLbl.TextColor3        = Color3.fromRGB(100,100,100)
@@ -1427,4 +1416,4 @@ task.spawn(function()
     end
 end)
 
-print("[Oil Empire] v3.1 loaded ✅ | Auto Sell Fixed | Anti-AFK ready!")
+print("[Oil Empire] v3 loaded ✅ | Anti-AFK fixed | Instant TP | Solar pickup added!")

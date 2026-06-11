@@ -6,16 +6,18 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local lp       = Players.LocalPlayer
 local username = lp.Name
 local enabled    = false
-local tweenSpeed = 0.1
+local tweenSpeed = 0       -- FIX #2: default 0 = instant TP (was 0.1)
 local useTween   = true
 local farmThread = nil
 local antiAfkOn  = false
-local antiAfkConn = nil
-local storageThreshold = 0     -- 0 = collect semua, 1-100 = minimal % fill
-local tpSpeed          = 0.06  -- detik wait setelah teleport (TP Speed)
+local antiAfkConn   = nil
+local antiAfkThread = nil  -- FIX #1: proactive anti-afk thread
+local storageThreshold = 0
+local tpSpeed          = 0.06
 
 -- ============================================
--- ANTI AFK
+-- FIX #1: ANTI AFK — proactive loop + Idled fallback
+-- Roblox kicks at 20 min idle → we press W every 14 min
 -- ============================================
 local function setAntiAfk(on)
     antiAfkOn = on
@@ -23,12 +25,43 @@ local function setAntiAfk(on)
         antiAfkConn:Disconnect()
         antiAfkConn = nil
     end
+    if antiAfkThread then
+        task.cancel(antiAfkThread)
+        antiAfkThread = nil
+    end
     if on then
+        -- Proactive loop: reset idle timer every 14 minutes
+        antiAfkThread = task.spawn(function()
+            while antiAfkOn do
+                task.wait(14 * 60) -- 14 minutes
+                if not antiAfkOn then break end
+                -- Method 1: VirtualInputManager
+                pcall(function()
+                    local vp = game:GetService("VirtualInputManager")
+                    vp:SendKeyEvent(true,  Enum.KeyCode.W, false, game)
+                    task.wait(0.15)
+                    vp:SendKeyEvent(false, Enum.KeyCode.W, false, game)
+                end)
+                -- Method 2: Humanoid move (backup)
+                pcall(function()
+                    local char = lp.Character
+                    local hum  = char and char:FindFirstChildOfClass("Humanoid")
+                    if hum then
+                        hum:Move(Vector3.new(0, 0, -1))
+                        task.wait(0.15)
+                        hum:Move(Vector3.new(0, 0, 0))
+                    end
+                end)
+            end
+        end)
+        -- Backup: also fire when Idled event triggers
         antiAfkConn = lp.Idled:Connect(function()
-            local vp = game:GetService("VirtualInputManager")
-            vp:SendKeyEvent(true,  Enum.KeyCode.W, false, game)
-            task.wait(0.1)
-            vp:SendKeyEvent(false, Enum.KeyCode.W, false, game)
+            pcall(function()
+                local vp = game:GetService("VirtualInputManager")
+                vp:SendKeyEvent(true,  Enum.KeyCode.W, false, game)
+                task.wait(0.1)
+                vp:SendKeyEvent(false, Enum.KeyCode.W, false, game)
+            end)
         end)
     end
 end
@@ -56,20 +89,20 @@ local function getBuildings()
     return plot and plot:FindFirstChild("Buildings") or nil
 end
 
-local function getRefineries(buildings)
-    local list = {}
-    for _, m in ipairs(buildings:GetChildren()) do
-        if m:IsA("Model") and m:GetAttribute("Type") == "Refinery" then
-            list[#list + 1] = m
-        end
-    end
-    return list
-end
+-- FIX #3: All collectible building types (includes Solar)
+local COLLECT_TYPES = {
+    Refinery   = true,
+    Solar      = true,
+    SolarPanel = true,
+    Electric   = true,
+    Generator  = true,
+    Collector  = true,
+    Barrel     = true,
+    Panel      = true,
+}
 
 local function getValues(model)
-    -- ✅ FIX: Coba berbagai cara baca storage value
-
-    -- Cara 1: Path original (kalau ada)
+    -- Cara 1: path original
     local ok, obj = pcall(function() return model.Primary.Info.Main.Value end)
     if ok and obj then
         local text = ((obj.Text or obj.Value or "")):gsub(",", "")
@@ -77,29 +110,27 @@ local function getValues(model)
         if c and m then return tonumber(c), tonumber(m) end
     end
 
-    -- Cara 2: Scan semua TextLabel/TextBox di descendants
-    -- (handle angka dengan koma: "400,000/400,000")
+    -- Cara 2: scan semua TextLabel/TextBox
     for _, v in ipairs(model:GetDescendants()) do
         if v:IsA("TextLabel") or v:IsA("TextBox") then
             local t = (v.Text or ""):gsub(",", ""):gsub("%s", "")
             local c, m = t:match("^(%d+)/(%d+)$")
-            if c and m then
-                return tonumber(c), tonumber(m)
-            end
+            if c and m then return tonumber(c), tonumber(m) end
         end
     end
 
-    -- Cara 3: GetAttribute (fallback)
+    -- Cara 3: GetAttribute (includes energy/electric attrs)
     local cur = model:GetAttribute("StoredGas")
               or model:GetAttribute("Storage")
               or model:GetAttribute("Current")
               or model:GetAttribute("Oil")
-              or 0
+              or model:GetAttribute("Electric")
+              or model:GetAttribute("Energy")
     local max = model:GetAttribute("MaxStorage")
               or model:GetAttribute("Capacity")
               or model:GetAttribute("Max")
-              or 1
-    return cur, max
+    if cur ~= nil and max ~= nil then return cur, max end
+    return 0, 0   -- FIX: was returning 0,1 causing false positives
 end
 
 local function getPrimary(model)
@@ -108,8 +139,31 @@ local function getPrimary(model)
     return model.PrimaryPart
 end
 
+-- FIX #3: getCollectibles — includes Solar + any model with storage
+local function getCollectibles(buildings)
+    local list = {}
+    for _, m in ipairs(buildings:GetChildren()) do
+        if m:IsA("Model") then
+            local btype = m:GetAttribute("Type")
+            if btype then
+                if COLLECT_TYPES[btype] then
+                    list[#list + 1] = m
+                end
+            else
+                -- Tidak ada Type attribute: cek apakah ada storage
+                local _, max = getValues(m)
+                if max > 0 then list[#list + 1] = m end
+            end
+        end
+    end
+    return list
+end
+
+local getRefineries = getCollectibles -- alias
+
 -- ============================================
 -- TELEPORT
+-- FIX #2: tweenSpeed > 0 (was > 0.05) → slider di 0.0 = instant
 -- ============================================
 local function teleport(targetCF)
     local char = lp.Character
@@ -119,7 +173,7 @@ local function teleport(targetCF)
     local hum = char:FindFirstChildOfClass("Humanoid")
     hrp.Anchored = true
     if hum then hum.PlatformStand = true end
-    if useTween and tweenSpeed > 0.05 then
+    if useTween and tweenSpeed > 0 then  -- FIX: was > 0.05
         local startCF  = hrp.CFrame
         local elapsed  = 0
         local duration = tweenSpeed
@@ -136,8 +190,7 @@ local function teleport(targetCF)
 end
 
 -- ============================================
--- FIX: FUNGSI COLLECT DARI REFINERY
--- Mencoba ProximityPrompt & RemoteEvent
+-- COLLECT — supports Solar/Electric remotes
 -- ============================================
 local collectRemote = nil
 
@@ -148,7 +201,9 @@ local function cacheCollectRemote()
             local n = v.Name:lower()
             if n:find("collect") or n:find("pickup")
             or n:find("refinery") or n:find("harvest")
-            or n:find("farm") or n:find("drain") then
+            or n:find("farm") or n:find("drain")
+            or n:find("solar") or n:find("electric")  -- FIX #3: solar/electric
+            or n:find("energy") or n:find("generate") then
                 collectRemote = v
                 return
             end
@@ -156,20 +211,20 @@ local function cacheCollectRemote()
     end
 end
 
-local function collectFromRefinery(model)
-    -- Cara 1: Coba semua ProximityPrompt di refinery
+local function collectFromBuilding(model)
     local fired = false
+    -- Cara 1: semua ProximityPrompt di descendants
     for _, v in ipairs(model:GetDescendants()) do
         if v:IsA("ProximityPrompt") then
             pcall(function()
                 fireproximityprompt(v)
                 fired = true
             end)
-            task.wait(0.1)
+            task.wait(0.08)
         end
     end
 
-    -- Cara 2: Coba Primary part punya ProximityPrompt
+    -- Cara 2: ProximityPrompt di Primary
     local primary = getPrimary(model)
     if primary then
         for _, v in ipairs(primary:GetChildren()) do
@@ -178,12 +233,12 @@ local function collectFromRefinery(model)
                     fireproximityprompt(v)
                     fired = true
                 end)
-                task.wait(0.1)
+                task.wait(0.08)
             end
         end
     end
 
-    -- Cara 3: Coba RemoteEvent collect
+    -- Cara 3: RemoteEvent collect
     cacheCollectRemote()
     if collectRemote then
         pcall(function()
@@ -192,12 +247,13 @@ local function collectFromRefinery(model)
         end)
     end
 
-    -- Cara 4: Cari RemoteEvent dengan nama apapun yang relevan
+    -- Cara 4: Scan semua RemoteEvent relevan
     if not fired then
         for _, v in ipairs(ReplicatedStorage:GetDescendants()) do
             if v:IsA("RemoteEvent") then
                 local n = v.Name:lower()
-                if n:find("gas") or n:find("oil") or n:find("fuel") then
+                if n:find("gas") or n:find("oil") or n:find("fuel")
+                or n:find("solar") or n:find("electric") or n:find("energy") then
                     pcall(function() v:FireServer(model) end)
                     task.wait(0.05)
                 end
@@ -206,14 +262,16 @@ local function collectFromRefinery(model)
     end
 end
 
+local collectFromRefinery = collectFromBuilding -- alias
+
 -- ============================================
--- FIX: FARM LOOP - Collect 0% hingga 100%
+-- FARM LOOP
 -- ============================================
 local function farmLoop()
     while enabled do
         local buildings = getBuildings()
         if not buildings then task.wait(1) continue end
-        local list = getRefineries(buildings)
+        local list = getCollectibles(buildings)
         if #list == 0 then task.wait(1) continue end
 
         -- Urutkan dari yang paling penuh
@@ -231,25 +289,20 @@ local function farmLoop()
             if not model.Parent then continue end
             local cur, max = getValues(model)
 
-            -- ✅ FIX 1: Storage Threshold check sebelum teleport
             if cur > 0 then
                 local pct = (max > 0) and (cur / max * 100) or 0
                 if pct >= storageThreshold then
                     local primary = getPrimary(model)
                     if primary then
-                        -- ✅ FIX 2: Offset benar — Y = setengah tinggi model + tinggi HRP (3.2)
                         local yOff = (primary.Size.Y / 2) + 3.2
                         teleport(CFrame.new(
                             primary.Position.X,
                             primary.Position.Y + yOff,
                             primary.Position.Z
                         ))
-                        task.wait(tpSpeed) -- ✅ FIX 3: Pakai tpSpeed bukan hardcoded 0.3
-
-                        -- Trigger collect
-                        collectFromRefinery(model)
                         task.wait(tpSpeed)
-
+                        collectFromBuilding(model)
+                        task.wait(tpSpeed)
                         visited = visited + 1
                     end
                 end
@@ -600,9 +653,7 @@ local function mkLabel(parent, text, size, x, y, w, h_, bold, color)
     return l
 end
 
--- ============================================
 -- STATUS CARD
--- ============================================
 local statusCard = mkCard(56, 1)
 
 local statusDot = Instance.new("Frame", statusCard)
@@ -613,36 +664,31 @@ statusDot.BorderSizePixel  = 0
 corner(statusDot, 99)
 
 local statusLabel = mkLabel(statusCard,"INACTIVE",11,28,6,0.75,16,true,Color3.fromRGB(65,65,65))
-local drillCountLabel = mkLabel(statusCard,"0 refineries found",10,28,24,0.75,14,false,Color3.fromRGB(120,120,120))
-
--- ✅ Label persentase collect
+local drillCountLabel = mkLabel(statusCard,"0 buildings found",10,28,24,0.75,14,false,Color3.fromRGB(120,120,120))
 local collectPctLabel = mkLabel(statusCard,"Collect: 0% - 100%",10,28,38,0.75,14,false,Color3.fromRGB(80,130,100))
 
--- ============================================
 -- FARM CARD
--- ============================================
 local farmCard = mkCard(50, 2)
 mkLabel(farmCard,"Auto Pickup",13,14,10,0.7,18,true)
 do
-    local l = mkLabel(farmCard,"Collects refineries (0–100%)",12,14,28,0,15,false,Color3.fromRGB(70,70,70))
-    l.Size = UDim2.new(0,200,0,15)
+    local l = mkLabel(farmCard,"Refinery + Solar (0–100%)",12,14,28,0,15,false,Color3.fromRGB(70,70,70))
+    l.Size = UDim2.new(0,210,0,15)
     l.TextTruncate = Enum.TextTruncate.AtEnd
 end
 local switchBg, switchKnob, switchBtn = mkSwitch(farmCard, false)
 
--- ============================================
 -- TWEEN SPEED CARD
--- ============================================
+-- FIX #2: MIN_S = 0 → slider bisa sampai 0.0s (instant)
 local sliderCard = mkCard(68, 3)
 mkLabel(sliderCard,"Tween Speed",13,14,9,0.55,18,true)
 do
-    local l = mkLabel(sliderCard,"Duration per tween",12,14,27,0,14,false,Color3.fromRGB(70,70,70))
+    local l = mkLabel(sliderCard,"0.0s = Instant TP",12,14,27,0,14,false,Color3.fromRGB(70,70,70))
     l.Size = UDim2.new(0,152,0,14)
     l.TextTruncate = Enum.TextTruncate.AtEnd
 end
 
 local speedVal = Instance.new("TextLabel", sliderCard)
-speedVal.Text              = "0.1s"
+speedVal.Text              = "0.0s"   -- FIX #2: default instant
 speedVal.Size              = UDim2.new(0.45,-14,0,22)
 speedVal.Position          = UDim2.new(0.55,0,0,9)
 speedVal.BackgroundTransparency = 1
@@ -658,7 +704,7 @@ track.BackgroundColor3 = Color3.fromRGB(36,36,36)
 track.BorderSizePixel  = 0
 corner(track, 99)
 
-local MIN_S, MAX_S = 0.1, 1.0
+local MIN_S, MAX_S = 0, 1.0   -- FIX #2: was 0.1, now 0 for instant
 local fill = Instance.new("Frame", track)
 fill.Size             = UDim2.new(0,0,1,0)
 fill.BackgroundColor3 = Color3.fromRGB(150,150,150)
@@ -674,14 +720,12 @@ knob.BorderSizePixel  = 0
 knob.ZIndex           = 3
 corner(knob, 99)
 
-mkLabel(sliderCard,"0.1s",11,14,57,0,13,false,Color3.fromRGB(55,55,55))
+mkLabel(sliderCard,"0.0s",11,14,57,0,13,false,Color3.fromRGB(55,55,55))  -- FIX #2: was 0.1s
 local rmax = mkLabel(sliderCard,"1.0s",11,0,57,1,13,false,Color3.fromRGB(55,55,55))
 rmax.TextXAlignment = Enum.TextXAlignment.Right
 rmax.Position = UDim2.new(1,-44,0,57)
 
--- ============================================
--- STORAGE THRESHOLD CARD (LayoutOrder 4)
--- ============================================
+-- STORAGE THRESHOLD CARD
 local threshCard = mkCard(68, 4)
 mkLabel(threshCard,"Storage Threshold (%)",13,14,9,0.75,18,true)
 do
@@ -727,9 +771,7 @@ local threshRMax = mkLabel(threshCard,"100%",11,0,57,1,13,false,Color3.fromRGB(5
 threshRMax.TextXAlignment = Enum.TextXAlignment.Right
 threshRMax.Position = UDim2.new(1,-44,0,57)
 
--- ============================================
--- TP SPEED CARD (LayoutOrder 5)
--- ============================================
+-- TP SPEED CARD
 local tpSpeedCard = mkCard(68, 5)
 mkLabel(tpSpeedCard,"TP Speed",13,14,9,0.55,18,true)
 do
@@ -778,9 +820,7 @@ local tpRMax = mkLabel(tpSpeedCard,"0.5s",11,0,57,1,13,false,Color3.fromRGB(55,5
 tpRMax.TextXAlignment = Enum.TextXAlignment.Right
 tpRMax.Position = UDim2.new(1,-44,0,57)
 
--- ============================================
 -- AUTOSELL - GAS PRICE CARD
--- ============================================
 local gasPriceCard = mkCard(72, 10)
 mkLabel(gasPriceCard,"GAS PRICE",11,14,8,0.5,13,true,Color3.fromRGB(80,80,80))
 
@@ -967,7 +1007,7 @@ afkLabel.Font              = Enum.Font.GothamSemibold
 afkLabel.TextXAlignment    = Enum.TextXAlignment.Left
 
 local afkSub = Instance.new("TextLabel", afkCard)
-afkSub.Text              = "Prevents idle kick"
+afkSub.Text              = "Proactive — press W every 14 min"
 afkSub.Size              = UDim2.new(1,-80,0,13)
 afkSub.Position          = UDim2.new(0,40,0.5,4)
 afkSub.BackgroundTransparency = 1
@@ -1003,7 +1043,7 @@ footerFrame.BackgroundTransparency = 1
 footerFrame.LayoutOrder       = 99
 
 local footerLbl = Instance.new("TextLabel", footerFrame)
-footerLbl.Text              = "made by dekxonn | fixed by claude"
+footerLbl.Text              = "made by dekxonn | fixed by claude (v3)"
 footerLbl.Size              = UDim2.new(1,0,1,0)
 footerLbl.BackgroundTransparency = 1
 footerLbl.TextColor3        = Color3.fromRGB(100,100,100)
@@ -1055,7 +1095,7 @@ end)
 closeBtn.MouseButton1Click:Connect(function()
     enabled     = false
     sellEnabled = false
-    setAntiAfk(false)
+    setAntiAfk(false) -- handles antiAfkThread + antiAfkConn cleanup
     if farmThread then task.cancel(farmThread); farmThread = nil end
     if sellThread then task.cancel(sellThread); sellThread = nil end
     TweenService:Create(main, TweenInfo.new(0.15), {Size = UDim2.new(0,MAIN_W,0,0)}):Play()
@@ -1086,7 +1126,7 @@ switchBtn.MouseButton1Click:Connect(function()
 end)
 
 -- ============================================
--- SLIDER TWEEN SPEED
+-- SLIDER TWEEN SPEED (MIN=0 untuk instant)
 -- ============================================
 local sliderActive = false
 local function setSlider(alpha)
@@ -1293,7 +1333,7 @@ for _, btn in ipairs({closeBtn, minBtn, minusBtn, plusBtn}) do
 end
 
 -- ============================================
--- COUNTER REFINERY
+-- COUNTER (Refinery + Solar)
 -- ============================================
 local counterConn1, counterConn2
 local function refreshCounter()
@@ -1303,18 +1343,17 @@ local function refreshCounter()
         drillCountLabel.TextColor3 = Color3.fromRGB(55,35,35)
         return
     end
-    local list = getRefineries(buildings)
+    local list = getCollectibles(buildings)
     local n = #list
-    drillCountLabel.Text       = n .. " refiner" .. (n == 1 and "y" or "ies") .. " found"
+    drillCountLabel.Text       = n .. " building" .. (n == 1 and "" or "s") .. " found"
     drillCountLabel.TextColor3 = Color3.fromRGB(120,120,120)
 
-    -- Hitung yang ada isinya
     local hasContent = 0
     for _, m in ipairs(list) do
         local cur, _ = getValues(m)
         if cur > 0 then hasContent = hasContent + 1 end
     end
-    collectPctLabel.Text = hasContent .. "/" .. n .. " refineries ready to collect"
+    collectPctLabel.Text = hasContent .. "/" .. n .. " ready to collect"
 end
 
 local function hookCounter()
@@ -1374,4 +1413,4 @@ task.spawn(function()
     end
 end)
 
-print("[Oil Empire] Script loaded ✅ | Teleport offset fixed | Storage Threshold & TP Speed added!")
+print("[Oil Empire] v3 loaded ✅ | Anti-AFK fixed | Instant TP | Solar pickup added!")

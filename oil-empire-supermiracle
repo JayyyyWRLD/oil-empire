@@ -67,11 +67,39 @@ local function getRefineries(buildings)
 end
 
 local function getValues(model)
+    -- ✅ FIX: Coba berbagai cara baca storage value
+
+    -- Cara 1: Path original (kalau ada)
     local ok, obj = pcall(function() return model.Primary.Info.Main.Value end)
-    if not ok or not obj then return 0, 0 end
-    local text = (obj.Text or obj.Value or "")
-    local c, m = text:match("^(%d+)/(%d+)$")
-    return tonumber(c) or 0, tonumber(m) or 0
+    if ok and obj then
+        local text = ((obj.Text or obj.Value or "")):gsub(",", "")
+        local c, m = text:match("(%d+)/(%d+)")
+        if c and m then return tonumber(c), tonumber(m) end
+    end
+
+    -- Cara 2: Scan semua TextLabel/TextBox di descendants
+    -- (handle angka dengan koma: "400,000/400,000")
+    for _, v in ipairs(model:GetDescendants()) do
+        if v:IsA("TextLabel") or v:IsA("TextBox") then
+            local t = (v.Text or ""):gsub(",", ""):gsub("%s", "")
+            local c, m = t:match("^(%d+)/(%d+)$")
+            if c and m then
+                return tonumber(c), tonumber(m)
+            end
+        end
+    end
+
+    -- Cara 3: GetAttribute (fallback)
+    local cur = model:GetAttribute("StoredGas")
+              or model:GetAttribute("Storage")
+              or model:GetAttribute("Current")
+              or model:GetAttribute("Oil")
+              or 0
+    local max = model:GetAttribute("MaxStorage")
+              or model:GetAttribute("Capacity")
+              or model:GetAttribute("Max")
+              or 1
+    return cur, max
 end
 
 local function getPrimary(model)

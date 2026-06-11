@@ -11,6 +11,8 @@ local useTween   = true
 local farmThread = nil
 local antiAfkOn  = false
 local antiAfkConn = nil
+local storageThreshold = 0     -- 0 = collect semua, 1-100 = minimal % fill
+local tpSpeed          = 0.06  -- detik wait setelah teleport (TP Speed)
 
 -- ============================================
 -- ANTI AFK
@@ -201,19 +203,27 @@ local function farmLoop()
             if not model.Parent then continue end
             local cur, max = getValues(model)
 
-            -- ✅ FIX: Collect dari 0% hingga 100% (bukan hanya saat penuh)
+            -- ✅ FIX 1: Storage Threshold check sebelum teleport
             if cur > 0 then
-                local primary = getPrimary(model)
-                if primary then
-                    -- Teleport ke refinery
-                    teleport(primary.CFrame * CFrame.new(0, 0, -3))
-                    task.wait(0.3) -- Tunggu sebentar setelah teleport
+                local pct = (max > 0) and (cur / max * 100) or 0
+                if pct >= storageThreshold then
+                    local primary = getPrimary(model)
+                    if primary then
+                        -- ✅ FIX 2: Offset benar — Y = setengah tinggi model + tinggi HRP (3.2)
+                        local yOff = (primary.Size.Y / 2) + 3.2
+                        teleport(CFrame.new(
+                            primary.Position.X,
+                            primary.Position.Y + yOff,
+                            primary.Position.Z
+                        ))
+                        task.wait(tpSpeed) -- ✅ FIX 3: Pakai tpSpeed bukan hardcoded 0.3
 
-                    -- Trigger collect
-                    collectFromRefinery(model)
-                    task.wait(0.3)
+                        -- Trigger collect
+                        collectFromRefinery(model)
+                        task.wait(tpSpeed)
 
-                    visited = visited + 1
+                        visited = visited + 1
+                    end
                 end
             end
         end
@@ -642,6 +652,105 @@ rmax.TextXAlignment = Enum.TextXAlignment.Right
 rmax.Position = UDim2.new(1,-44,0,57)
 
 -- ============================================
+-- STORAGE THRESHOLD CARD (LayoutOrder 4)
+-- ============================================
+local threshCard = mkCard(68, 4)
+mkLabel(threshCard,"Storage Threshold (%)",13,14,9,0.75,18,true)
+do
+    local l = mkLabel(threshCard,"0 = collect all",12,14,27,0,14,false,Color3.fromRGB(70,70,70))
+    l.Size = UDim2.new(0,152,0,14)
+    l.TextTruncate = Enum.TextTruncate.AtEnd
+end
+
+local threshVal = Instance.new("TextLabel", threshCard)
+threshVal.Text              = "0%"
+threshVal.Size              = UDim2.new(0.45,-14,0,22)
+threshVal.Position          = UDim2.new(0.55,0,0,9)
+threshVal.BackgroundTransparency = 1
+threshVal.TextColor3        = Color3.fromRGB(155,155,155)
+threshVal.TextSize          = 18
+threshVal.Font              = Enum.Font.GothamBold
+threshVal.TextXAlignment    = Enum.TextXAlignment.Right
+
+local threshTrack = Instance.new("Frame", threshCard)
+threshTrack.Size             = UDim2.new(1,-28,0,4)
+threshTrack.Position         = UDim2.new(0,14,0,52)
+threshTrack.BackgroundColor3 = Color3.fromRGB(36,36,36)
+threshTrack.BorderSizePixel  = 0
+corner(threshTrack, 99)
+
+local threshFill = Instance.new("Frame", threshTrack)
+threshFill.Size             = UDim2.new(0,0,1,0)
+threshFill.BackgroundColor3 = Color3.fromRGB(100,190,150)
+threshFill.BorderSizePixel  = 0
+corner(threshFill, 99)
+
+local threshKnob = Instance.new("Frame", threshTrack)
+threshKnob.Size             = UDim2.new(0,14,0,14)
+threshKnob.AnchorPoint      = Vector2.new(0.5,0.5)
+threshKnob.Position         = UDim2.new(0,0,0.5,0)
+threshKnob.BackgroundColor3 = Color3.fromRGB(225,225,225)
+threshKnob.BorderSizePixel  = 0
+threshKnob.ZIndex           = 3
+corner(threshKnob, 99)
+
+mkLabel(threshCard,"0%",11,14,57,0,13,false,Color3.fromRGB(55,55,55))
+local threshRMax = mkLabel(threshCard,"100%",11,0,57,1,13,false,Color3.fromRGB(55,55,55))
+threshRMax.TextXAlignment = Enum.TextXAlignment.Right
+threshRMax.Position = UDim2.new(1,-44,0,57)
+
+-- ============================================
+-- TP SPEED CARD (LayoutOrder 5)
+-- ============================================
+local tpSpeedCard = mkCard(68, 5)
+mkLabel(tpSpeedCard,"TP Speed",13,14,9,0.55,18,true)
+do
+    local l = mkLabel(tpSpeedCard,"Jeda antar teleport",12,14,27,0,14,false,Color3.fromRGB(70,70,70))
+    l.Size = UDim2.new(0,152,0,14)
+    l.TextTruncate = Enum.TextTruncate.AtEnd
+end
+
+local tpSpeedVal = Instance.new("TextLabel", tpSpeedCard)
+tpSpeedVal.Text              = "0.06s"
+tpSpeedVal.Size              = UDim2.new(0.45,-14,0,22)
+tpSpeedVal.Position          = UDim2.new(0.55,0,0,9)
+tpSpeedVal.BackgroundTransparency = 1
+tpSpeedVal.TextColor3        = Color3.fromRGB(155,155,155)
+tpSpeedVal.TextSize          = 18
+tpSpeedVal.Font              = Enum.Font.GothamBold
+tpSpeedVal.TextXAlignment    = Enum.TextXAlignment.Right
+
+local tpTrack = Instance.new("Frame", tpSpeedCard)
+tpTrack.Size             = UDim2.new(1,-28,0,4)
+tpTrack.Position         = UDim2.new(0,14,0,52)
+tpTrack.BackgroundColor3 = Color3.fromRGB(36,36,36)
+tpTrack.BorderSizePixel  = 0
+corner(tpTrack, 99)
+
+local MIN_TP, MAX_TP = 0.02, 0.5
+local tpInitAlpha = (tpSpeed - MIN_TP) / (MAX_TP - MIN_TP)
+
+local tpFill = Instance.new("Frame", tpTrack)
+tpFill.Size             = UDim2.new(tpInitAlpha,0,1,0)
+tpFill.BackgroundColor3 = Color3.fromRGB(100,150,220)
+tpFill.BorderSizePixel  = 0
+corner(tpFill, 99)
+
+local tpKnob = Instance.new("Frame", tpTrack)
+tpKnob.Size             = UDim2.new(0,14,0,14)
+tpKnob.AnchorPoint      = Vector2.new(0.5,0.5)
+tpKnob.Position         = UDim2.new(tpInitAlpha,0,0.5,0)
+tpKnob.BackgroundColor3 = Color3.fromRGB(225,225,225)
+tpKnob.BorderSizePixel  = 0
+tpKnob.ZIndex           = 3
+corner(tpKnob, 99)
+
+mkLabel(tpSpeedCard,"0.02s",11,14,57,0,13,false,Color3.fromRGB(55,55,55))
+local tpRMax = mkLabel(tpSpeedCard,"0.5s",11,0,57,1,13,false,Color3.fromRGB(55,55,55))
+tpRMax.TextXAlignment = Enum.TextXAlignment.Right
+tpRMax.Position = UDim2.new(1,-44,0,57)
+
+-- ============================================
 -- AUTOSELL - GAS PRICE CARD
 -- ============================================
 local gasPriceCard = mkCard(72, 10)
@@ -981,6 +1090,70 @@ UserInputService.InputEnded:Connect(function(i)
 end)
 
 -- ============================================
+-- SLIDER STORAGE THRESHOLD
+-- ============================================
+local threshSliderActive = false
+local function setThreshSlider(alpha)
+    alpha              = math.clamp(alpha, 0, 1)
+    storageThreshold   = math.floor(alpha * 100 + 0.5)
+    local snapped      = storageThreshold / 100
+    threshVal.Text     = storageThreshold .. "%"
+    threshFill.Size    = UDim2.new(snapped, 0, 1, 0)
+    threshKnob.Position= UDim2.new(snapped, 0, 0.5, 0)
+end
+local function threshAlphaFromX(x)
+    return (x - threshTrack.AbsolutePosition.X) / threshTrack.AbsoluteSize.X
+end
+threshTrack.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then
+        threshSliderActive = true; setThreshSlider(threshAlphaFromX(i.Position.X))
+    end
+end)
+threshKnob.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then threshSliderActive = true end
+end)
+UserInputService.InputChanged:Connect(function(i)
+    if threshSliderActive and i.UserInputType == Enum.UserInputType.MouseMovement then
+        setThreshSlider(threshAlphaFromX(i.Position.X))
+    end
+end)
+UserInputService.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then threshSliderActive = false end
+end)
+
+-- ============================================
+-- SLIDER TP SPEED
+-- ============================================
+local tpSliderActive = false
+local function setTpSlider(alpha)
+    alpha          = math.clamp(alpha, 0, 1)
+    tpSpeed        = MIN_TP + (MAX_TP - MIN_TP) * alpha
+    tpSpeed        = math.floor(tpSpeed * 100 + 0.5) / 100
+    tpSpeedVal.Text = string.format("%.2fs", tpSpeed)
+    tpFill.Size     = UDim2.new(alpha, 0, 1, 0)
+    tpKnob.Position = UDim2.new(alpha, 0, 0.5, 0)
+end
+local function tpAlphaFromX(x)
+    return (x - tpTrack.AbsolutePosition.X) / tpTrack.AbsoluteSize.X
+end
+tpTrack.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then
+        tpSliderActive = true; setTpSlider(tpAlphaFromX(i.Position.X))
+    end
+end)
+tpKnob.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then tpSliderActive = true end
+end)
+UserInputService.InputChanged:Connect(function(i)
+    if tpSliderActive and i.UserInputType == Enum.UserInputType.MouseMovement then
+        setTpSlider(tpAlphaFromX(i.Position.X))
+    end
+end)
+UserInputService.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then tpSliderActive = false end
+end)
+
+-- ============================================
 -- SWITCH SELL
 -- ============================================
 sellSwitchBtn.MouseButton1Click:Connect(function()
@@ -1173,4 +1346,4 @@ task.spawn(function()
     end
 end)
 
-print("[Oil Empire] Script loaded ✅ | Auto Pickup 0-100% fixed!")
+print("[Oil Empire] Script loaded ✅ | Teleport offset fixed | Storage Threshold & TP Speed added!")
